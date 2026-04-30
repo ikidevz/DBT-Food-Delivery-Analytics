@@ -5,6 +5,8 @@ using the **Medallion Architecture** (Bronze → Silver → Gold) on a Philippin
 
 ---
 
+![IMG](dbt_data_model.png)
+
 ## 📐 Architecture
 
 ```
