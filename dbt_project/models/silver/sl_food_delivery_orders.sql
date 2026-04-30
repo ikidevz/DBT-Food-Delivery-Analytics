@@ -1,82 +1,71 @@
-{{
-    config(
-        materialized = 'table',
-        tags         = ['silver', 'cleaned']
-    )
-}}
+{{ config(
+    materialized = 'table',
+    tags         = ['silver', 'cleaned']
+) }}
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- SILVER | sl_food_delivery_orders
--- Layer   : Cleaned, validated, deduplicated
--- Depends : br_food_delivery_orders
---
--- Data quality rules applied:
---   1. Drop rows where customer_id or rider_id is NULL
---   2. Reject orders with a future order_datetime
---   3. Clamp negative order_total → 0  (flagged as data error)
---   4. Clamp zero / negative item_count → 1
---   5. Clamp negative delivery_fee → 0
---   6. Map unknown cities → 'Unknown'
---   7. Deduplicate on order_id — keep the most recent record
---   8. Derive grand_total = order_total + delivery_fee
---   9. Extract date-parts for easier downstream aggregation
+-- Layer   : Cleansed, standardized, and deduplicated orders
+-- Purpose : Single source of truth for clean order data
+--           All Gold models (fct_delivery, dim_customer, dim_rider, dim_restaurant) 
+--           should read from this table.
 -- ─────────────────────────────────────────────────────────────────────────────
 
-WITH validated AS (
+WITH source AS (
+
+    SELECT *
+    FROM {{ ref('br_food_delivery_orders') }}
+
+),
+
+validated AS (
 
     SELECT
         order_id,
-        CAST(order_datetime AS TIMESTAMP)                          AS order_datetime,
-        customer_id,
-        rider_id,
-        restaurant_id,
+        
+        -- Timestamp cleaning
+        CAST(order_datetime AS TIMESTAMP) AS order_datetime,
 
-        -- City guard: only accept known PH delivery cities
-        CASE
-            WHEN city IN (
-                'Davao', 'Cebu', 'Manila', 'Quezon City',
-                'Iloilo', 'Cagayan de Oro', 'Zamboanga', 'Bacolod'
-            ) THEN city
-            ELSE 'Unknown'
-        END                                                         AS city,
+        -- Foreign Keys - Core cleaning
+        NULLIF(TRIM(customer_id), '')     AS customer_id,
+        NULLIF(TRIM(rider_id), '')        AS rider_id,
+        NULLIF(TRIM(restaurant_id), '')   AS restaurant_id,
 
-        cuisine_type,
+        -- Location & Category
+        CASE 
+            WHEN UPPER(TRIM(city)) IN ('DAVAO', 'CEBU', 'MANILA', 'QUEZON CITY', 
+                                      'ILOILO', 'CAGAYAN DE ORO', 'ZAMBOANGA', 'BACOLOD') 
+            THEN TRIM(city)
+            ELSE 'Unknown' 
+        END AS city,
 
-        -- item_count must be ≥ 1
-        CASE
-            WHEN CAST(item_count AS INT) > 0 THEN CAST(item_count AS INT)
-            ELSE 1
-        END                                                         AS item_count,
+        TRIM(cuisine_type) AS cuisine_type,
 
-        -- order_total must be ≥ 0
-        CASE
-            WHEN CAST(order_total AS NUMERIC) > 0
-                THEN CAST(order_total AS NUMERIC)
-            ELSE 0
-        END                                                         AS order_total,
+        -- Numeric cleaning with sensible defaults
+        GREATEST(COALESCE(CAST(item_count AS INTEGER), 1), 1)        AS item_count,
+        
+        GREATEST(COALESCE(CAST(order_total AS NUMERIC), 0), 0)       AS order_total,
+        
+        GREATEST(COALESCE(CAST(delivery_fee AS NUMERIC), 0), 0)      AS delivery_fee,
 
-        -- delivery_fee must be ≥ 0
-        CASE
-            WHEN CAST(delivery_fee AS NUMERIC) >= 0
-                THEN CAST(delivery_fee AS NUMERIC)
-            ELSE 0
-        END                                                         AS delivery_fee,
+        -- Payment and Status (standardized)
+        TRIM(payment_method)     AS payment_method,
+        TRIM(delivery_status)    AS delivery_status,
 
-        payment_method,
-        delivery_status,
+        -- Rating validation (allow NULL - this is normal)
+        CASE 
+            WHEN CAST(customer_rating AS NUMERIC) BETWEEN 1.0 AND 5.0 
+                THEN ROUND(CAST(customer_rating AS NUMERIC), 1)
+            ELSE NULL 
+        END AS customer_rating
 
-        -- rating may legitimately be NULL (customer didn't rate)
-        CASE
-            WHEN CAST(customer_rating AS NUMERIC) BETWEEN 1.0 AND 5.0
-                THEN CAST(customer_rating AS NUMERIC)
-            ELSE NULL
-        END                                                         AS customer_rating
+    FROM source
 
-    FROM {{ ref('br_food_delivery_orders') }}
-    WHERE
-        customer_id   IS NOT NULL
-        AND rider_id  IS NOT NULL
-        AND CAST(order_datetime AS TIMESTAMP) <= CURRENT_TIMESTAMP
+    -- Rule: Drop clearly invalid rows
+    WHERE customer_id IS NOT NULL 
+      AND rider_id IS NOT NULL
+      AND restaurant_id IS NOT NULL
+      AND CAST(order_datetime AS TIMESTAMP) <= CURRENT_TIMESTAMP
 
 ),
 
@@ -85,10 +74,10 @@ deduplicated AS (
     SELECT
         *,
         ROW_NUMBER() OVER (
-            PARTITION BY order_id
-            ORDER BY order_datetime DESC
+            PARTITION BY order_id 
+            ORDER BY order_datetime DESC, 
+                     order_total DESC   -- secondary sort for determinism
         ) AS rn
-
     FROM validated
 
 ),
@@ -99,21 +88,24 @@ final AS (
         order_id,
         order_datetime,
 
-        -- Convenient date-part columns for Gold aggregations
+        -- Derived date parts (computed once here)
         CAST(order_datetime AS DATE)                                AS order_date,
         DATE_TRUNC('month', order_datetime)::DATE                   AS order_month,
-        EXTRACT(HOUR FROM order_datetime)::INT                      AS order_hour,
+        EXTRACT(HOUR FROM order_datetime)::SMALLINT                 AS order_hour,
         TO_CHAR(order_datetime, 'Dy')                               AS order_day_of_week,
+        TO_CHAR(order_datetime, 'Month')                            AS order_month_name,
 
         customer_id,
         rider_id,
         restaurant_id,
         city,
         cuisine_type,
+
         item_count,
         order_total,
         delivery_fee,
         order_total + delivery_fee                                  AS grand_total,
+
         payment_method,
         delivery_status,
         customer_rating
@@ -123,4 +115,4 @@ final AS (
 
 )
 
-SELECT * FROM final
+SELECT * FROM final;

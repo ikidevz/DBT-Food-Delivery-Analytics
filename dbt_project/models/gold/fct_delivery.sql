@@ -1,26 +1,15 @@
-{{
-    config(
-        materialized = 'table',
-        tags         = ['gold', 'fact']
-    )
-}}
+{{ config(
+    materialized = 'table',
+    tags         = ['gold', 'fact']
+) }}
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- GOLD | fct_delivery
--- Layer   : Fact table — one row per completed order transaction
+-- Layer   : Fact table — one row per order event
 -- Depends : sl_food_delivery_orders
 --
--- This is the central fact table of the food delivery warehouse.
--- It holds all measurable events (order amounts, fees, ratings) and
--- links to every dimension: customer, rider, restaurant, city, date.
---
--- Columns:
---   Surrogate keys  — for joining to dimension tables
---   Degenerate dims — order_id, delivery_status (stored on fact)
---   Measures        — order_total, delivery_fee, grand_total, item_count,
---                     customer_rating
---   Date spine      — order_date, order_month, order_hour, order_day_of_week
---   Derived flags   — is_delivered, is_cancelled, is_rated, peak_hour_flag
+-- Central fact table in the star schema.
+-- Contains all measurable business events and foreign keys to dimensions.
 -- ─────────────────────────────────────────────────────────────────────────────
 
 WITH base AS (
@@ -36,6 +25,7 @@ WITH base AS (
         customer_id,
         rider_id,
         restaurant_id,
+
         city,
         cuisine_type,
 
@@ -43,7 +33,6 @@ WITH base AS (
         order_total,
         delivery_fee,
         grand_total,
-
         payment_method,
         delivery_status,
         customer_rating
@@ -55,49 +44,52 @@ WITH base AS (
 final AS (
 
     SELECT
-        -- ── Identifiers ──────────────────────────────────────────────────
-        order_id,
-        customer_id,
-        rider_id,
-        restaurant_id,
+        -- ── Surrogate / Natural Keys ─────────────────────────────────────
+        order_id,                    -- Degenerate dimension
+        customer_id,                 -- FK → dim_customer
+        rider_id,                    -- FK → dim_rider
+        restaurant_id,               -- FK → dim_restaurant (we will add this)
 
-        -- ── Date spine ───────────────────────────────────────────────────
+        -- ── Date / Time Spine ─────────────────────────────────────────────
         order_datetime,
         order_date,
         order_month,
         order_hour,
         order_day_of_week,
 
-        -- ── Dimensions stored on fact ─────────────────────────────────────
+        -- ── Degenerate Dimensions (low cardinality, useful for filtering) ──
         city,
         cuisine_type,
         payment_method,
         delivery_status,
 
-        -- ── Measures ─────────────────────────────────────────────────────
+        -- ── Measures (Facts) ──────────────────────────────────────────────
         item_count,
-        ROUND(order_total::NUMERIC, 2)   AS order_total,
-        ROUND(delivery_fee::NUMERIC, 2)  AS delivery_fee,
-        ROUND(grand_total::NUMERIC, 2)   AS grand_total,
+        ROUND(order_total::NUMERIC, 2)     AS order_total,
+        ROUND(delivery_fee::NUMERIC, 2)    AS delivery_fee,
+        ROUND(grand_total::NUMERIC, 2)     AS grand_total,
         customer_rating,
 
-        -- ── Boolean flags (useful for BI tool filters) ────────────────────
-        CASE WHEN delivery_status = 'Delivered'       THEN TRUE ELSE FALSE END  AS is_delivered,
-        CASE WHEN delivery_status = 'Cancelled'       THEN TRUE ELSE FALSE END  AS is_cancelled,
-        CASE WHEN delivery_status = 'Failed Delivery' THEN TRUE ELSE FALSE END  AS is_failed,
-        CASE WHEN customer_rating IS NOT NULL         THEN TRUE ELSE FALSE END  AS is_rated,
+        -- ── Boolean Flags (highly recommended for BI tools) ───────────────
+        (delivery_status = 'Delivered')       AS is_delivered,
+        (delivery_status = 'Cancelled')       AS is_cancelled,
+        (delivery_status = 'Failed Delivery') AS is_failed,
+        (customer_rating IS NOT NULL)         AS is_rated,
 
-        -- Peak hour: lunch 11-13, dinner 17-20
+        -- ── Business Segments ─────────────────────────────────────────────
         CASE
             WHEN order_hour BETWEEN 11 AND 13 THEN 'Lunch Rush'
             WHEN order_hour BETWEEN 17 AND 20 THEN 'Dinner Rush'
             ELSE 'Off-Peak'
-        END                                                                     AS time_of_day_segment,
+        END                                   AS time_of_day_segment,
 
-        -- Weekend flag
         CASE
-            WHEN order_day_of_week IN ('Sat', 'Sun') THEN TRUE ELSE FALSE
-        END                                                                     AS is_weekend
+            WHEN order_day_of_week IN ('Sat', 'Sun') THEN TRUE 
+            ELSE FALSE 
+        END                                   AS is_weekend,
+
+        -- Optional: Add more useful flags if needed
+        (order_total > 500)                   AS is_high_value_order
 
     FROM base
 
