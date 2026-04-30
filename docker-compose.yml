@@ -1,0 +1,62 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Food Delivery Analytics — Docker Compose
+# Services  : postgres (warehouse)  +  dbt (transformer)
+# PostgreSQL : 17  (upgraded from 16)
+# dbt        : 1.11.6 (latest stable)
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── PostgreSQL Data Warehouse ──────────────────────────────────────────────
+  postgres:
+    image: postgres:17
+    container_name: fd_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     ${POSTGRES_USER:-dbt_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dbt_password}
+      POSTGRES_DB:       ${POSTGRES_DB:-food_delivery_dw}
+    ports:
+      - "5432:5432"
+    volumes:
+      - fd_postgres_data:/var/lib/postgresql/data
+      # Optional: mount init SQL scripts to pre-create schemas
+      - ./init-scripts:/docker-entrypoint-initdb.d
+    networks:
+      - fd_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dbt_user} -d ${POSTGRES_DB:-food_delivery_dw}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ── dbt Transformer ───────────────────────────────────────────────────────
+  dbt:
+    build: .
+    container_name: fd_dbt
+    environment:
+      POSTGRES_HOST:     postgres
+      POSTGRES_USER:     ${POSTGRES_USER:-dbt_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dbt_password}
+      POSTGRES_DB:       ${POSTGRES_DB:-food_delivery_dw}
+    volumes:
+      - ./dbt_project:/usr/app
+      - ./dbt_project/.dbt:/root/.dbt
+    depends_on:
+      postgres:
+        condition: service_healthy   # wait until Postgres is actually ready
+    networks:
+      - fd_network
+    # Default command — override at runtime:
+    #   docker compose run dbt test
+    #   docker compose run dbt docs generate
+    command: run
+
+volumes:
+  fd_postgres_data:
+    driver: local
+
+networks:
+  fd_network:
+    driver: bridge

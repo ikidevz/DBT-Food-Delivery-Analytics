@@ -1,0 +1,61 @@
+name: 'food_delivery_analytics'
+version: '1.0.0'
+config-version: 2
+
+profile: 'food_delivery'
+
+# Model paths
+model-paths: ["models"]
+seed-paths:  ["seeds"]
+test-paths:  ["tests"]
+macro-paths: ["macros"]
+
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+# ── Require dbt-core >= 1.11 ──────────────────────────────────────────────────
+require-dbt-version: [">=1.11.0", "<2.0.0"]
+
+# ── Model configurations per layer ───────────────────────────────────────────
+models:
+  food_delivery_analytics:
+
+    bronze:
+      +materialized: view
+      +schema: bronze
+      +tags: ['bronze']
+      +docs:
+        node_color: '#cd7f32'   # bronze colour in dbt docs DAG
+
+    silver:
+      +materialized: table
+      +schema: silver
+      +tags: ['silver']
+      +docs:
+        node_color: '#c0c0c0'   # silver
+
+    gold:
+      +materialized: table
+      +schema: gold
+      +tags: ['gold']
+      +docs:
+        node_color: '#ffd700'   # gold
+
+# ── Seed configurations ───────────────────────────────────────────────────────
+seeds:
+  food_delivery_analytics:
+    +schema: raw
+
+# ── Variables (override at run-time with --vars) ──────────────────────────────
+vars:
+  valid_cities:
+    - 'Davao'
+    - 'Cebu'
+    - 'Manila'
+    - 'Quezon City'
+    - 'Iloilo'
+    - 'Cagayan de Oro'
+    - 'Zamboanga'
+    - 'Bacolod'
